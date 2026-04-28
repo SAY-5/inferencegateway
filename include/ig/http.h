@@ -38,13 +38,34 @@ struct HttpResponse {
     std::string body;
 };
 
+// RawHandler is the streaming-mode handler. It is given the live
+// client fd; the handler is responsible for writing the entire HTTP
+// response (status line + headers + body chunks). After the handler
+// returns the connection is closed by the server. Use this for SSE
+// pass-through; ordinary JSON endpoints should use Handler.
+//
+// Returning false signals an unrecoverable I/O error so the server
+// can stop trying to write to the fd.
+struct RawContext {
+    int fd = -1;
+    HttpRequest req;
+};
+
 class HttpServer {
 public:
-    using Handler = std::function<HttpResponse(const HttpRequest&)>;
+    using Handler    = std::function<HttpResponse(const HttpRequest&)>;
+    using RawHandler = std::function<bool(const RawContext&)>;
 
     void Route(const std::string& method, const std::string& path, Handler h) {
         std::lock_guard<std::mutex> lk(mu_);
         routes_[method + " " + path] = std::move(h);
+    }
+
+    // RouteRaw registers a streaming handler. Wins over Route on
+    // collisions (lookup checks raw_routes_ first).
+    void RouteRaw(const std::string& method, const std::string& path, RawHandler h) {
+        std::lock_guard<std::mutex> lk(mu_);
+        raw_routes_[method + " " + path] = std::move(h);
     }
 
     bool Listen(const std::string& host, int port, int worker_threads = 32) {
@@ -125,18 +146,25 @@ private:
                 body_have += m;
             }
             req.body = buf.substr(h + 4, cl);
-            HttpResponse resp;
+            // Raw (streaming) handlers win over normal handlers — they
+            // get exclusive write access to the fd.
+            RawHandler raw;
             Handler hnd;
             {
                 std::lock_guard<std::mutex> lk(mu_);
-                auto rit = routes_.find(req.method + " " + req.path);
-                if (rit == routes_.end()) {
-                    // Try prefix routes (we don't, but a common
-                    // extension would be /v1/* matching).
-                    rit = routes_.find(req.method + " *");
+                auto rt = raw_routes_.find(req.method + " " + req.path);
+                if (rt != raw_routes_.end()) raw = rt->second;
+                else {
+                    auto rit = routes_.find(req.method + " " + req.path);
+                    if (rit != routes_.end()) hnd = rit->second;
                 }
-                if (rit != routes_.end()) hnd = rit->second;
             }
+            if (raw) {
+                RawContext ctx{fd, std::move(req)};
+                (void)raw(ctx);
+                return;
+            }
+            HttpResponse resp;
             if (!hnd) {
                 resp = {.status = 404, .content_type = "text/plain", .body = "not found"};
             } else {
@@ -194,7 +222,50 @@ private:
     std::vector<std::thread> workers_;
     std::mutex mu_;
     std::map<std::string, Handler> routes_;
+    std::map<std::string, RawHandler> raw_routes_;
 };
+
+// Open a TCP connection to host:port and send a POST request with the
+// given body. Returns the fd if the connect+send succeeds, else -1.
+// Caller is responsible for reading from / closing the fd.
+//
+// Used for streaming pass-through: the gateway opens a connection to
+// the backend, forwards the request, then pumps response bytes back
+// to the client without buffering the whole body.
+inline int HttpPostStreamFD(const std::string& host, int port,
+                            const std::string& path, const std::string& body,
+                            int timeout_ms) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    timeval tv{ timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* res = nullptr;
+    if (::getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0
+        || res == nullptr) {
+        ::close(fd);
+        return -1;
+    }
+    bool ok = ::connect(fd, res->ai_addr, res->ai_addrlen) == 0;
+    ::freeaddrinfo(res);
+    if (!ok) { ::close(fd); return -1; }
+
+    std::ostringstream os;
+    os << "POST " << path << " HTTP/1.1\r\n"
+       << "Host: " << host << ":" << port << "\r\n"
+       << "Content-Type: application/json\r\n"
+       << "Content-Length: " << body.size() << "\r\n"
+       << "Accept: text/event-stream\r\n"
+       << "Connection: close\r\n\r\n"
+       << body;
+    std::string req = os.str();
+    if (::send(fd, req.data(), req.size(), 0) < 0) { ::close(fd); return -1; }
+    return fd;
+}
 
 // Minimal blocking HTTP client used by the dispatcher to forward to
 // backends. Connection-per-request — keep-alive is a refinement.

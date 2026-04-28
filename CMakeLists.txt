@@ -36,3 +36,7 @@ add_test(NAME router COMMAND test_router)
 add_executable(test_scheduler tests/test_scheduler.cpp)
 target_link_libraries(test_scheduler PRIVATE ig_headers)
 add_test(NAME scheduler COMMAND test_scheduler)
+
+add_executable(test_stream tests/test_stream.cpp)
+target_link_libraries(test_stream PRIVATE ig_headers)
+add_test(NAME stream COMMAND test_stream)

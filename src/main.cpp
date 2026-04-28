@@ -3,6 +3,7 @@
 // Wires HttpServer → Scheduler → BackendPool → HttpPost dispatcher.
 
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -195,6 +196,108 @@ int main(int argc, char** argv) {
     };
     srv.Route("POST", "/v1/completions", forward);
     srv.Route("POST", "/v1/chat/completions", forward);
+
+    // Streaming pass-through (SSE). The OpenAI streaming protocol is
+    // text/event-stream over HTTP/1.1; we open a connection to the
+    // chosen backend, forward the request as-is, then pump each chunk
+    // back to the client without buffering the full body. The
+    // scheduler still does the routing + bookkeeping; we just don't
+    // run our usual HttpPost (which would buffer the entire response).
+    auto streamForward = [&](const ig::RawContext& ctx) -> bool {
+        struct Slot { std::mutex m; std::condition_variable c; bool ready = false; int idx = -1; };
+        auto slot = std::make_shared<Slot>();
+        ig::Request r;
+        r.path = ctx.req.path;
+        r.body = ctx.req.body;
+        r.on_dispatch = [slot](int idx, const std::string&) {
+            std::lock_guard<std::mutex> lk(slot->m);
+            slot->idx = idx;
+            slot->ready = true;
+            slot->c.notify_one();
+        };
+        scheduler.Submit(std::move(r));
+
+        std::unique_lock<std::mutex> lk(slot->m);
+        slot->c.wait_for(lk, std::chrono::seconds(30), [&] { return slot->ready; });
+        lk.unlock();
+
+        if (slot->idx < 0) {
+            const char* fail =
+                "HTTP/1.1 503 Service Unavailable\r\n"
+                "Content-Type: application/json\r\n"
+                "Content-Length: 38\r\nConnection: close\r\n\r\n"
+                "{\"ok\":false,\"err\":\"no healthy backend\"}";
+            ::send(ctx.fd, fail, std::strlen(fail), 0);
+            return false;
+        }
+        std::string host, b_path; int b_port;
+        const auto& b = pool.At(static_cast<size_t>(slot->idx));
+        parseBackendURL(b.url, host, b_port, b_path);
+
+        // Force the body's "stream" flag to true if it wasn't set.
+        // Real clients will already include it; this is belt-and-
+        // suspenders for the demo.
+        std::string body = ctx.req.body;
+        if (body.find("\"stream\"") == std::string::npos) {
+            // Trivial JSON injection: replace last `}` with `,"stream":true}`.
+            auto pos = body.rfind('}');
+            if (pos != std::string::npos) body = body.substr(0, pos) + ",\"stream\":true}";
+        }
+
+        auto t0 = std::chrono::steady_clock::now();
+        int bfd = ig::HttpPostStreamFD(host, b_port, ctx.req.path, body, dispatch_timeout_ms);
+        if (bfd < 0) {
+            pool.OnComplete(static_cast<size_t>(slot->idx),
+                            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), false);
+            const char* fail =
+                "HTTP/1.1 502 Bad Gateway\r\n"
+                "Content-Type: application/json\r\n"
+                "Content-Length: 39\r\nConnection: close\r\n\r\n"
+                "{\"ok\":false,\"err\":\"backend dial failed\"}";
+            ::send(ctx.fd, fail, std::strlen(fail), 0);
+            return false;
+        }
+        // Send SSE response headers to the client up front. We then
+        // read response chunks from the backend and forward the body
+        // (after stripping the backend's response headers — first
+        // CRLFCRLF). This way we don't accidentally double up status
+        // lines.
+        const char* hdr =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Cache-Control: no-cache\r\n"
+            "X-Accel-Buffering: no\r\n"
+            "Connection: close\r\n\r\n";
+        ::send(ctx.fd, hdr, std::strlen(hdr), 0);
+
+        // Pump.
+        char buf[4096];
+        std::string preamble;
+        bool past_headers = false;
+        for (;;) {
+            ssize_t n = ::recv(bfd, buf, sizeof(buf), 0);
+            if (n <= 0) break;
+            if (!past_headers) {
+                preamble.append(buf, n);
+                auto h = preamble.find("\r\n\r\n");
+                if (h == std::string::npos) continue;
+                past_headers = true;
+                std::string remainder = preamble.substr(h + 4);
+                if (!remainder.empty()) {
+                    if (::send(ctx.fd, remainder.data(), remainder.size(), 0) < 0) break;
+                }
+                preamble.clear();
+                continue;
+            }
+            if (::send(ctx.fd, buf, n, 0) < 0) break;
+        }
+        ::close(bfd);
+        pool.OnComplete(static_cast<size_t>(slot->idx),
+                        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), true);
+        return true;
+    };
+    srv.RouteRaw("POST", "/v1/completions/stream", streamForward);
+    srv.RouteRaw("POST", "/v1/chat/completions/stream", streamForward);
 
     std::cout << "inferenceg listening " << listen << ":" << port
               << " · " << pool.Size() << " backend(s)"

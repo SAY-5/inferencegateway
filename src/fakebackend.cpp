@@ -4,11 +4,13 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <random>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <sys/socket.h>
 
 #include "ig/http.h"
 
@@ -39,6 +41,30 @@ int main(int argc, char** argv) {
         return ig::HttpResponse{200, "application/json",
             R"({"choices":[{"message":{"role":"assistant","content":"fake reply"}}]})"};
     });
+    // Streaming variant — emits 4 SSE frames then `data: [DONE]`.
+    auto streamHandler = [&](const ig::RawContext& ctx) -> bool {
+        served.fetch_add(1);
+        const char* hdr =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Cache-Control: no-cache\r\n"
+            "Connection: close\r\n\r\n";
+        ::send(ctx.fd, hdr, std::strlen(hdr), 0);
+        const char* frames[] = {
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"lo \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"wor\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ld\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        };
+        for (auto* f : frames) {
+            ::send(ctx.fd, f, std::strlen(f), 0);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        return true;
+    };
+    srv.RouteRaw("POST", "/v1/completions/stream", streamHandler);
+    srv.RouteRaw("POST", "/v1/chat/completions/stream", streamHandler);
     srv.Route("POST", "/v1/models", [&](const ig::HttpRequest&) {
         return ig::HttpResponse{200, "application/json", R"({"data":[{"id":"fake-1"}]})"};
     });
