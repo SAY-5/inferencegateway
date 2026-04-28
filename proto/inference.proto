@@ -1,0 +1,57 @@
+// gRPC sketch — kept here so the project can be flipped to gRPC
+// transport with a small delta on src/main.cpp. Not currently
+// generated; the live transport is HTTP/JSON.
+
+syntax = "proto3";
+package inferencegateway.v1;
+
+service Inference {
+  rpc Completions(CompletionRequest) returns (CompletionResponse);
+  rpc StreamCompletions(CompletionRequest) returns (stream CompletionChunk);
+  rpc ClusterInfo(Empty) returns (ClusterInfoResponse);
+}
+
+message Empty {}
+
+message CompletionRequest {
+  string  model       = 1;
+  string  prompt      = 2;
+  uint32  max_tokens  = 3;
+  float   temperature = 4;
+  bool    stream      = 5;
+  // free-form pass-through for backend-specific params.
+  map<string, string> extra = 99;
+}
+
+message CompletionChoice {
+  string text          = 1;
+  string finish_reason = 2;
+}
+
+message CompletionResponse {
+  string                       id      = 1;
+  repeated CompletionChoice    choices = 2;
+}
+
+message CompletionChunk {
+  string id    = 1;
+  string delta = 2;
+  bool   done  = 3;
+}
+
+message Backend {
+  string id      = 1;
+  string url     = 2;
+  bool   healthy = 3;
+  uint32 inflight = 4;
+  uint64 total_requests = 5;
+  uint64 total_errors   = 6;
+}
+
+message ClusterInfoResponse {
+  repeated Backend backends   = 1;
+  string           policy     = 2;
+  uint64           queue_depth = 3;
+  uint64           dispatched  = 4;
+  uint64           dropped     = 5;
+}

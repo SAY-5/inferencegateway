@@ -1,0 +1,21 @@
+services:
+  b0: { build: ., command: ["fakebackend", "--port", "9001"], networks: [ig], expose: ["9001"] }
+  b1: { build: ., command: ["fakebackend", "--port", "9001"], networks: [ig], expose: ["9001"] }
+  b2: { build: ., command: ["fakebackend", "--port", "9001"], networks: [ig], expose: ["9001"] }
+  b3: { build: ., command: ["fakebackend", "--port", "9001"], networks: [ig], expose: ["9001"] }
+
+  gateway:
+    build: .
+    command:
+      - "--port"
+      - "9090"
+      - "--policy"
+      - "p2c"
+      - "--backends"
+      - "http://b0:9001,http://b1:9001,http://b2:9001,http://b3:9001"
+    ports: ["9090:9090"]
+    networks: [ig]
+    depends_on: [b0, b1, b2, b3]
+
+networks:
+  ig:

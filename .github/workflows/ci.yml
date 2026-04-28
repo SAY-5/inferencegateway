@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  cmake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+      - run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build -j$(nproc)
+      - run: ctest --test-dir build --output-on-failure
+
+  smoke:
+    runs-on: ubuntu-latest
+    needs: [cmake]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y cmake build-essential curl
+      - run: cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
+      - name: integration smoke (gateway + 4 backends + loadgen)
+        run: |
+          ./build/fakebackend --port 9001 &
+          ./build/fakebackend --port 9002 &
+          ./build/fakebackend --port 9003 &
+          ./build/fakebackend --port 9004 &
+          sleep 1
+          ./build/inferenceg --port 9090 --backends http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003,http://127.0.0.1:9004 &
+          sleep 1
+          curl -s http://127.0.0.1:9090/healthz
+          ./build/loadgen --port 9090 --d 5 --c 16
+          curl -s http://127.0.0.1:9090/metrics | head -40
+          curl -s http://127.0.0.1:9090/v1/cluster
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: [cmake]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: inferencegateway:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
