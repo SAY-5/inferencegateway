@@ -25,6 +25,11 @@ namespace ig {
 struct Request {
     std::string path;
     std::string body;
+    // Optional session id. When non-empty, the scheduler hashes this
+    // to a stable backend index (KV-cache locality). On affinity miss
+    // — backend unhealthy — the scheduler falls back to the
+    // configured Policy.
+    std::string session_id;
     std::chrono::steady_clock::time_point enqueued_at;
     // Per-request callback called when the dispatcher has picked a
     // backend and started forwarding. Tests use this to observe
@@ -80,7 +85,24 @@ private:
                 queue_.pop();
                 queue_depth_.store(queue_.size(), std::memory_order_relaxed);
             }
-            int idx = router_.Pick(pool_->Snapshot());
+            // v3: session-affinity routing. When the request carries
+            // a session id, hash it to a stable backend slot so
+            // followup requests in the same session land on the same
+            // backend. KV cache stays warm. Falls through to the
+            // configured policy on empty session id or unhealthy hit.
+            auto snap = pool_->Snapshot();
+            int idx = -1;
+            bool affinity_hit = false;
+            if (!r.session_id.empty()) {
+                idx = PickAffinity(snap, r.session_id);
+                if (idx >= 0) {
+                    affinity_hit = true;
+                    affinity_hits_.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+            if (idx < 0) {
+                idx = router_.Pick(snap);
+            }
             auto picked_at = std::chrono::steady_clock::now();
             double overhead_sec =
                 std::chrono::duration<double>(picked_at - r.enqueued_at).count();
@@ -90,6 +112,7 @@ private:
                 if (r.on_dispatch) r.on_dispatch(-1, "no healthy backend");
                 continue;
             }
+            (void)affinity_hit;  // recorded above; could feed per-request log
             pool_->OnDispatch(static_cast<size_t>(idx));
             dispatched_.fetch_add(1, std::memory_order_relaxed);
             if (r.on_dispatch) r.on_dispatch(idx, r.body);
@@ -109,7 +132,12 @@ private:
     std::atomic<uint64_t> queue_depth_{0};
     std::atomic<uint64_t> dispatched_{0};
     std::atomic<uint64_t> dropped_{0};
+    std::atomic<uint64_t> affinity_hits_{0};
     Histogram overhead_;
+
+public:
+    // Telemetry for the affinity path.
+    uint64_t AffinityHits() const { return affinity_hits_.load(std::memory_order_relaxed); }
 };
 
 }  // namespace ig

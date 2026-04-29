@@ -48,6 +48,10 @@ inline std::string ExportMetrics(const BackendPool& pool, const Scheduler& sched
     os << "# TYPE ig_scheduler_dropped_total counter\n";
     os << "ig_scheduler_dropped_total " << sched.Dropped() << "\n";
 
+    os << "# HELP ig_scheduler_affinity_hits_total session-affinity hits\n";
+    os << "# TYPE ig_scheduler_affinity_hits_total counter\n";
+    os << "ig_scheduler_affinity_hits_total " << sched.AffinityHits() << "\n";
+
     writeHistogram(os, "ig_scheduler_overhead_seconds",
                    "enqueue→dispatch overhead, seconds", "",
                    sched.OverheadHistogram());

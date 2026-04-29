@@ -142,10 +142,28 @@ int main(int argc, char** argv) {
            << "\"dropped\":" << scheduler.Dropped() << "}";
         return ig::HttpResponse{200, "application/json", os.str()};
     });
+    // Extract a session id from either the X-Session-Id header
+    // (preferred — clients own it) or a `session_id` JSON field in
+    // the body (fallback for clients that can't add headers).
+    auto extractSession = [](const ig::HttpRequest& req) -> std::string {
+        auto it = req.headers.find("x-session-id");
+        if (it != req.headers.end()) return it->second;
+        auto p = req.body.find("\"session_id\"");
+        if (p == std::string::npos) return "";
+        auto colon = req.body.find(':', p);
+        if (colon == std::string::npos) return "";
+        auto q = req.body.find('"', colon);
+        if (q == std::string::npos) return "";
+        auto end = req.body.find('"', q + 1);
+        if (end == std::string::npos) return "";
+        return req.body.substr(q + 1, end - q - 1);
+    };
+
     auto forward = [&](const ig::HttpRequest& req) {
         ig::Request r;
         r.path = req.path;
         r.body = req.body;
+        r.session_id = extractSession(req);
         // We block the HTTP worker until the scheduler dispatches. Real
         // production uses an async response loop; this keeps the demo
         // simple. Shared state lives in `slot` below; the dispatcher's

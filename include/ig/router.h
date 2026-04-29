@@ -21,6 +21,38 @@ enum class Policy {
     Random,
 };
 
+// Picks a backend by hashing a session id consistently to a slot —
+// every request sharing the session id lands on the same backend as
+// long as the topology is unchanged. The KV cache on that backend
+// stays warm across the session, which is the dominant production
+// optimization for chat workloads. Falls back to p2c when the
+// session_id is empty OR the affinity pick lands on an unhealthy
+// backend.
+inline int PickAffinity(const std::vector<BackendPool::View>& snap,
+                        const std::string& session_id) {
+    if (snap.empty()) return -1;
+    if (!session_id.empty()) {
+        // FNV-1a — same hash family as the rest of the codebase
+        // (cf. internal/hashring in distributedkv). 64-bit.
+        uint64_t h = 1469598103934665603ULL;
+        for (unsigned char c : session_id) {
+            h ^= c;
+            h *= 1099511628211ULL;
+        }
+        size_t idx = static_cast<size_t>(h % snap.size());
+        if (snap[idx].healthy) return static_cast<int>(snap[idx].idx);
+        // Affinity pick is unhealthy — walk forward until we find one
+        // that is. Preserves locality for nearby session ids while
+        // gracefully degrading on backend loss.
+        for (size_t step = 1; step < snap.size(); ++step) {
+            size_t j = (idx + step) % snap.size();
+            if (snap[j].healthy) return static_cast<int>(snap[j].idx);
+        }
+        return -1;
+    }
+    return -1;
+}
+
 class Router {
 public:
     explicit Router(Policy policy, uint64_t rng_seed = 0xc1c2c3c4)

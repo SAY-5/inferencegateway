@@ -42,7 +42,7 @@ static void testSchedulerDispatchesAllRequests() {
             dispatches.fetch_add(1);
         });
     s.Start();
-    for (int i = 0; i < 30; ++i) s.Submit({"/v1/completions", "{}", {}, nullptr});
+    for (int i = 0; i < 30; ++i) s.Submit({"/v1/completions", "{}", "", {}, nullptr});
     // Wait for drain.
     for (int i = 0; i < 200 && dispatches.load() < 30; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -60,7 +60,7 @@ static void testSchedulerDropsWhenAllUnhealthy() {
     ig::Scheduler s(&pool, ig::Policy::PowerOfTwo,
         [&](int, const ig::Request&) { calls.fetch_add(1); });
     s.Start();
-    for (int i = 0; i < 5; ++i) s.Submit({"/v1/completions", "{}", {}, nullptr});
+    for (int i = 0; i < 5; ++i) s.Submit({"/v1/completions", "{}", "", {}, nullptr});
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     s.Stop();
     EXPECT(calls.load() == 0);
@@ -72,7 +72,7 @@ static void testSchedulerOverheadMetric() {
     ig::Scheduler s(&pool, ig::Policy::RoundRobin,
         [&](int idx, const ig::Request&) { pool.OnComplete(static_cast<size_t>(idx), 0.0, true); });
     s.Start();
-    for (int i = 0; i < 200; ++i) s.Submit({"/v1/completions", "{}", {}, nullptr});
+    for (int i = 0; i < 200; ++i) s.Submit({"/v1/completions", "{}", "", {}, nullptr});
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     s.Stop();
     auto p99 = s.OverheadHistogram().Percentile(0.99);
@@ -85,7 +85,7 @@ static void testMetricsExpositionShapeSane() {
     ig::Scheduler s(&pool, ig::Policy::RoundRobin,
         [&](int idx, const ig::Request&) { pool.OnComplete(static_cast<size_t>(idx), 0.001, true); });
     s.Start();
-    for (int i = 0; i < 5; ++i) s.Submit({"/v1/completions", "{}", {}, nullptr});
+    for (int i = 0; i < 5; ++i) s.Submit({"/v1/completions", "{}", "", {}, nullptr});
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     s.Stop();
     std::string out = ig::ExportMetrics(pool, s);

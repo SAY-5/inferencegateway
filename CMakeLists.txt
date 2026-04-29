@@ -40,3 +40,7 @@ add_test(NAME scheduler COMMAND test_scheduler)
 add_executable(test_stream tests/test_stream.cpp)
 target_link_libraries(test_stream PRIVATE ig_headers)
 add_test(NAME stream COMMAND test_stream)
+
+add_executable(test_affinity tests/test_affinity.cpp)
+target_link_libraries(test_affinity PRIVATE ig_headers)
+add_test(NAME affinity COMMAND test_affinity)
