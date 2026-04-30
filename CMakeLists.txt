@@ -44,3 +44,7 @@ add_test(NAME stream COMMAND test_stream)
 add_executable(test_affinity tests/test_affinity.cpp)
 target_link_libraries(test_affinity PRIVATE ig_headers)
 add_test(NAME affinity COMMAND test_affinity)
+
+add_executable(test_v4_circuit tests/test_v4_circuit.cpp)
+target_link_libraries(test_v4_circuit PRIVATE ig_headers)
+add_test(NAME v4_circuit COMMAND test_v4_circuit)
